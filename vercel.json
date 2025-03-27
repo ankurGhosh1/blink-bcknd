@@ -14,10 +14,10 @@
     }
   ],
   "env": {
-    "NEON_DB_CONNECTION_STRING": "@neon_db_connection_string",
-    "GROQ_API_KEY": "@groq_api_key",
-    "RAPID_API_KEY": "@rapid_api_key",
-    "HUNTER_API_KEY": "@hunter_api_key",
-    "SENDGRID_API_KEY": "@sendgrid_api_key"
+    "NEON_DB_CONNECTION_STRING": "@NEON_DB_CONNECTION_STRING",
+    "GROQ_API_KEY": "@GROQ_API_KEY",
+    "RAPID_API_KEY": "@RAPID_API_KEY",
+    "HUNTER_API_KEY": "@HUNTER_API_KEY",
+    "SENDGRID_API_KEY": "@SENDGRID_API_KEY"
   }
 }
