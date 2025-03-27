@@ -15,7 +15,13 @@ from sendgrid.helpers.mail import Mail, To
 load_dotenv()
 
 app = Flask(__name__)
-CORS(app)
+# Allow multiple origins: localhost for development, and the deployed frontend URL
+allowed_origins = [
+    "http://localhost:3000",  # Development
+    "https://blink-frontend.vercel.app",  # Vercel deployment (replace with your frontend URL)
+    # Add your custom domain in production, e.g., "https://frontend.yourdomain.com"
+]
+CORS(app, resources={r"/*": {"origins": allowed_origins}})
 
 # API keys from environment variables
 app.config['GROQ_API_KEY'] = os.getenv("GROQ_API_KEY")
