@@ -11,7 +11,6 @@ import psycopg2
 from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Mail, To
 
-# Fixed Deployment
 # Load environment variables
 load_dotenv()
 
