@@ -1,5 +1,4 @@
 from flask import Flask, request, jsonify, g
-from flask_cors import CORS
 import requests
 from bs4 import BeautifulSoup
 import csv
@@ -15,13 +14,38 @@ from sendgrid.helpers.mail import Mail, To
 load_dotenv()
 
 app = Flask(__name__)
+
 # Allow multiple origins: localhost for development, and the deployed frontend URL
 allowed_origins = [
     "http://localhost:3000",  # Development
-    "https://blink-fntd.vercel.app",  # Vercel deployment (replace with your frontend URL)
+    "https://blink-fntd.vercel.app",  # Vercel deployment
     # Add your custom domain in production, e.g., "https://frontend.yourdomain.com"
 ]
-CORS(app, resources={r"/*": {"origins": allowed_origins}})
+
+# Handle CORS for all requests
+@app.before_request
+def handle_cors_preflight():
+    if request.method == "OPTIONS":
+        response = jsonify({"status": "OK"})
+        origin = request.headers.get("Origin")
+        print(f"OPTIONS Request Origin: {origin}")
+        if origin in allowed_origins:
+            response.headers["Access-Control-Allow-Origin"] = origin
+            response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+            response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+        print(f"OPTIONS Response Headers: {response.headers}")
+        return response
+
+@app.after_request
+def add_cors_headers(response):
+    origin = request.headers.get("Origin")
+    print(f"Request Origin: {origin}")
+    if origin in allowed_origins:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+    print(f"Response Headers: {response.headers}")
+    return response
 
 # API keys from environment variables
 app.config['GROQ_API_KEY'] = os.getenv("GROQ_API_KEY")
