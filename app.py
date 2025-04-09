@@ -1,4 +1,6 @@
-from flask import Flask, request, jsonify, g
+from flask import Flask, request, jsonify, g, redirect, url_for, session
+from flask_dance.contrib.google import make_google_blueprint, google
+from functools import wraps
 import requests
 from bs4 import BeautifulSoup
 import csv
@@ -14,12 +16,16 @@ from sendgrid.helpers.mail import Mail, To
 load_dotenv()
 
 app = Flask(__name__)
+app.config["SECRET_KEY"] = os.getenv("FLASK_SECRET_KEY")
+app.config["GOOGLE_OAUTH_CLIENT_ID"] = os.getenv("GOOGLE_OAUTH_CLIENT_ID")
+app.config["GOOGLE_OAUTH_CLIENT_SECRET"] = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET")
+GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v1/userinfo"
 
 # Allow multiple origins: localhost for development, and the deployed frontend URL
 allowed_origins = [
     "http://localhost:3000",  # Development
     "https://blink-fntd.vercel.app",  # Vercel deployment
-    # Add your custom domain in production, e.g., "https://frontend.yourdomain.com"
+    # Add your custom domain in production, e.g., "https://app.domain.com"
 ]
 
 # Handle CORS for all requests
@@ -29,10 +35,13 @@ def handle_cors_preflight():
         response = jsonify({"status": "OK"})
         origin = request.headers.get("Origin")
         print(f"OPTIONS Request Origin: {origin}")
-        if origin in allowed_origins:
+        if origin and origin in allowed_origins:
             response.headers["Access-Control-Allow-Origin"] = origin
-            response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-            response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+        else:
+            response.headers["Access-Control-Allow-Origin"] = "https://blink-fntd.vercel.app"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+        response.headers["Access-Control-Max-Age"] = "86400"
         print(f"OPTIONS Response Headers: {response.headers}")
         return response
 
@@ -40,10 +49,12 @@ def handle_cors_preflight():
 def add_cors_headers(response):
     origin = request.headers.get("Origin")
     print(f"Request Origin: {origin}")
-    if origin in allowed_origins:
+    if origin and origin in allowed_origins:
         response.headers["Access-Control-Allow-Origin"] = origin
-        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+    else:
+        response.headers["Access-Control-Allow-Origin"] = "https://blink-fntd.vercel.app"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
     print(f"Response Headers: {response.headers}")
     return response
 
@@ -68,6 +79,13 @@ INDUSTRIES = [
     "Technology", "Marketing", "Health", "Finance",
     "E-commerce", "Education", "Entertainment", "Other"
 ]
+
+# Google OAuth setup
+google_bp = make_google_blueprint(
+    scope=["profile", "email"],
+    redirect_to="google_callback"
+)
+app.register_blueprint(google_bp, url_prefix="/auth")
 
 # Database connection management
 def get_db():
@@ -96,12 +114,138 @@ def init_db():
             role VARCHAR(255)
         )
     """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id SERIAL PRIMARY KEY,
+            email VARCHAR(255) UNIQUE NOT NULL,
+            name VARCHAR(255),
+            provider VARCHAR(50),
+            provider_id VARCHAR(255),
+            is_admin BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
     db.commit()
     cursor.close()
 
-# Call init_db when the app starts
 with app.app_context():
     init_db()
+
+# Route protection decorators
+def login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if "user_id" not in session:
+            return jsonify({"error": "Unauthorized, please log in"}), 401
+        return f(*args, **kwargs)
+    return decorated_function
+
+def admin_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        db = get_db()
+        cursor = db.cursor()
+        cursor.execute("SELECT is_admin FROM users WHERE id = %s", (session["user_id"],))
+        user = cursor.fetchone()
+        cursor.close()
+        if not user or not user[0]:
+            return jsonify({"error": "Admin access required"}), 403
+        return f(*args, **kwargs)
+    return decorated_function
+
+# OAuth routes
+@app.route("/login")
+def login():
+    if not google.authorized:
+        return redirect(url_for("google.login"))
+    return redirect(url_for("google_callback"))
+
+# @app.route("/auth/google/callback", methods=["POST"])
+# def google_callback():
+#     if not google.authorized:
+#         return jsonify({"error": "Google login failed"}), 401
+#     resp = google.get("/plus/v1/people/me")
+#     if resp.ok:
+#         email = resp.json()["emails"][0]["value"]
+#         name = resp.json()["displayName"]
+#         provider_id = resp.json()["id"]
+        
+#         db = get_db()
+#         cursor = db.cursor()
+#         cursor.execute(
+#             "SELECT * FROM users WHERE provider = %s AND provider_id = %s",
+#             ("google", provider_id)
+#         )
+#         user = cursor.fetchone()
+#         if not user:
+#             cursor.execute(
+#                 "INSERT INTO users (email, name, provider, provider_id) VALUES (%s, %s, %s, %s) RETURNING *",
+#                 (email, name, "google", provider_id)
+#             )
+#             user = cursor.fetchone()
+#             db.commit()
+#         cursor.close()
+        
+#         session["user_id"] = user[0]
+#         return jsonify({"message": "Login successful", "user": {"email": user[1], "name": user[2]}})
+#     return jsonify({"error": "Error during login"}), 500
+
+@app.route("/auth/google/callback", methods=["POST"])
+def google_callback():
+    auth_header = request.headers.get("Authorization")
+    
+    if not auth_header or "Bearer " not in auth_header:
+        return jsonify({"error": "Missing or invalid Authorization header"}), 401
+
+    access_token = auth_header.split("Bearer ")[-1]  # Extract token
+
+    # Verify the Google Access Token
+    userinfo_response = requests.get(
+        GOOGLE_USERINFO_URL,
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+
+    if userinfo_response.status_code != 200:
+        return jsonify({"error": "Invalid Google token"}), 401
+
+    userinfo = userinfo_response.json()
+    email = userinfo.get("email")
+    name = userinfo.get("name")
+    provider_id = userinfo.get("id")
+
+    if not email or not provider_id:
+        return jsonify({"error": "Invalid user data from Google"}), 400
+
+    # Store user in database
+    db = get_db()
+    cursor = db.cursor()
+    cursor.execute(
+        "SELECT * FROM users WHERE provider = %s AND provider_id = %s",
+        ("google", provider_id)
+    )
+    user = cursor.fetchone()
+
+    if not user:
+        cursor.execute(
+            "INSERT INTO users (email, name, provider, provider_id) VALUES (%s, %s, %s, %s) RETURNING *",
+            (email, name, "google", provider_id)
+        )
+        user = cursor.fetchone()
+        db.commit()
+
+    cursor.close()
+    
+    session["user_id"] = user[0]
+
+    return jsonify({
+        "message": "Login successful",
+        "user": {"email": user[1], "name": user[2]}
+    })
+
+@app.route("/logout")
+def logout():
+    session.pop("user_id", None)
+    return jsonify({"message": "Logged out successfully"})
 
 def fetch_ahrefs_data(domain):
     """Fetch DR and traffic data from Ahrefs APIs."""
@@ -316,6 +460,7 @@ def process_domains(target_domain, target_industry, csv_file):
     return results
 
 @app.route("/analyze", methods=["POST"])
+@login_required
 def analyze_domains():
     """API endpoint to handle domain analysis."""
     if "csv_file" not in request.files or "target_domain" not in request.form or "target_industry" not in request.form:
@@ -335,16 +480,18 @@ def analyze_domains():
         return jsonify({"error": f"Processing failed: {str(e)}"}), 500
 
 @app.route("/fetch-emails/<domain>", methods=["GET"])
+@login_required
 def fetch_domain_emails(domain):
     """API endpoint to fetch emails for a specific domain."""
     emails = fetch_emails(domain)
     return jsonify({"domain": domain, "emails": emails})
 
 @app.route("/send-email", methods=["POST"])
+@login_required
 def send_email():
     """API endpoint to send bulk emails using SendGrid."""
     data = request.get_json()
-    to_emails = data.get("to")  # List of recipient emails
+    to_emails = data.get("to")
     from_email = data.get("from")
     subject = data.get("subject")
     body = data.get("body")
@@ -356,28 +503,21 @@ def send_email():
         return jsonify({"error": "Recipient emails must be a list"}), 400
 
     try:
-        # Initialize SendGrid client
         sg = SendGridAPIClient(app.config['SENDGRID_API_KEY'])
-
-        # Create the email message
         message = Mail(
             from_email=from_email,
             subject=subject,
             plain_text_content=body
         )
-
-        # Add multiple recipients
         message.to = [To(email) for email in to_emails]
-
-        # Send the email
         response = sg.send(message)
         return jsonify({"message": "Email sent successfully", "status_code": response.status_code})
     except Exception as e:
         return jsonify({"error": f"Failed to send email: {str(e)}"}), 500
 
-# New route to upload CSV and push to Neon database
-
 @app.route("/upload-contacts", methods=["POST"])
+@login_required
+@admin_required
 def upload_contacts():
     """API endpoint to upload a CSV file and insert contacts into the Neon database."""
     if "csv_file" not in request.files:
@@ -388,16 +528,9 @@ def upload_contacts():
         return jsonify({"error": "File must be a CSV"}), 400
 
     try:
-        # Read the CSV file
         csv_text = csv_file.read().decode("utf-8")
         csv_reader = csv.DictReader(StringIO(csv_text))
-
-        # Normalize headers to lowercase for case-insensitive comparison
-        if csv_reader.fieldnames is None:
-            return jsonify({"error": "CSV file is empty or invalid"}), 400
         normalized_fieldnames = [field.lower() for field in csv_reader.fieldnames]
-
-        # Validate required headers (case-insensitive)
         required_headers = {"website", "first_name", "last_name", "email", "linkedin", "role"}
         if not required_headers.issubset(normalized_fieldnames):
             return jsonify({"error": f"CSV must contain headers: {', '.join(required_headers)}"}), 400
@@ -406,9 +539,7 @@ def upload_contacts():
         cursor = db.cursor()
         inserted_rows = 0
 
-        # Insert each row into the contacts table
         for row in csv_reader:
-            # Map the row keys to lowercase to match the database fields
             normalized_row = {k.lower(): v for k, v in row.items()}
             cursor.execute("""
                 INSERT INTO contacts (website, first_name, last_name, email, linkedin, role)
@@ -430,6 +561,7 @@ def upload_contacts():
         return jsonify({"error": f"Failed to process CSV: {str(e)}"}), 500
     
 @app.route("/get-contacts", methods=["GET"])
+@login_required
 def get_contacts():
     """API endpoint to fetch all contacts from the database."""
     try:
